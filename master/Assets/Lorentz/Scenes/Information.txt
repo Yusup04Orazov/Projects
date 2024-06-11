@@ -1,0 +1,8 @@
+This is a sample scene used for the Lorentz Force simulator in Unity.
+Project page: https://github.com/TheNumber5/lorentz-force-unity
+Date: 18/08/2021
+Version: v0.6
+
+Date: 07/05/2023
+Version: v1.0
+-Completed the program

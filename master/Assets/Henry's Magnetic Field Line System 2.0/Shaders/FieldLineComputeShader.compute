@@ -1,0 +1,69 @@
+#pragma kernel CSMain
+
+static const int threadCount = 1024;
+
+uint _NumberOfCharges;
+uint _MaxLineSegments;
+
+float _StepSize = 0.0169;
+float _MaxFieldThreshold = 4500;
+float _MinFieldThreshold = 0.58;
+float _MaxDistance = 6.17;
+
+StructuredBuffer<float4> _Charge;
+StructuredBuffer<float4> _FieldSource;
+RWStructuredBuffer<float4> _LineSegment;
+RWStructuredBuffer<float4> _LineDirection;
+
+//Utility functions
+float InverseLerp(float a, float b, float v) {return (v-a)/(b-a);}
+float Remap(float iMin, float iMax, float oMin, float oMax, float v) {float t = InverseLerp(iMin, iMax, v); return lerp(oMin, oMax, t);}
+
+//Loops through all of the charges and computes the electric field at a point.  The w component of _Charges is the charge
+float4 calculateElectricFieldFromPointCharges(float3 radialVector) {
+    float3 electricField = float3(0,0,0);
+    float polarity = 0;
+    float signedMagnitude;
+
+    for(uint i = 0; i < _NumberOfCharges; i++) {
+        signedMagnitude = _Charge[i].w/pow(length(radialVector - _Charge[i].xyz), 2);
+
+        electricField += signedMagnitude * normalize(radialVector - _Charge[i].xyz);
+        polarity += signedMagnitude;
+    }
+
+    return float4(electricField, polarity);
+} 
+
+//Compute shader kernel -- inputs field source point and computes field line segment positions and directions for _MaxLineSegments line segments
+[numthreads(threadCount,1,1)]
+void CSMain(uint3 id : SV_DispatchThreadID) { 
+    if(id.x < _NumberOfCharges * _MaxLineSegments) {
+        //Retrieve the field source point for this thread
+        float4 currentPoint = _FieldSource[id.x];
+
+        uint segmentIndex = 0;
+        for(uint i = 0; i < _MaxLineSegments; i++) {
+            float4 fieldData = calculateElectricFieldFromPointCharges(currentPoint.xyz);
+            float3 field = currentPoint.w * fieldData.xyz;
+            if(length(field) > _MaxFieldThreshold || length(field) < _MinFieldThreshold || length(currentPoint) > _MaxDistance) {break;}
+            
+            currentPoint += float4(normalize(field) * _StepSize,0);
+
+            _LineSegment[id.x * _MaxLineSegments + i] = float4(currentPoint.xyz,1);
+            _LineDirection[id.x * _MaxLineSegments + i] = float4(normalize(field), fieldData.w);
+            ++segmentIndex;
+        } 
+
+        //Fill up the rest of the compute buffer allocation for this source point.  This is required by the compute shader
+        for(i = segmentIndex; i < _MaxLineSegments; i++) {
+            _LineSegment[id.x * _MaxLineSegments + i] = float4(currentPoint.xyz,0);
+            _LineDirection[id.x * _MaxLineSegments + i] = float4(0,0,0,0);
+        } 
+
+        _LineSegment[id.x * _MaxLineSegments + _MaxLineSegments - 1].w = -1;
+
+        //The w component of _LineSegment allows us to mark if a segment it valid(1), filler(0), or end of field line(-1)
+        //The w component of _LineDirection allows us store the "signedMagnitude" of the field for coloring
+    }
+}

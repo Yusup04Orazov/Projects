@@ -1,0 +1,3 @@
+SHAREDANCHOR onsharepressed -> savetocloudthenshare -> onsharecomplete -> 
+PHOTONANCHORMANAGER publishanchoruuids -> checkforanchorsshared -> 
+SHAREDANCHORLOADER -> loadanchorsfromremote

@@ -1,0 +1,194 @@
+#pragma kernel CSMain
+
+static const float PI = 3.14159265f;
+static const int threadCount = 1024;
+
+uint _ParticleCount;
+
+float _particleCharge;
+float _particleMass;
+float _earthMagneticFieldMagnitude;
+float _earthRadius;
+float3 _earthDipole;
+
+float _dt;
+float _initialSpeed;
+
+RWStructuredBuffer<float3> _Position;
+RWStructuredBuffer<float3> _Velocity;
+
+//Utility Functions
+float InverseLerp(float a, float b, float v) {return (v-a)/(b-a);}
+float Remap(float iMin, float iMax, float oMin, float oMax, float v) {float t = InverseLerp(iMin, iMax, v); return lerp(oMin, oMax, t);}
+
+float getR(float3 position) {return length(position);}
+float getTheta(float3 position) {return acos(position.z / length(position));}
+float getPhi(float3 position) {return sign(position.y) * acos(position.x / length(position.xy));}
+float getX(float r, float theta, float phi) {return r * sin(theta) * cos(phi);}
+float getY(float r, float theta, float phi) {return r * sin(theta) * sin(phi);}
+float getZ(float r, float theta, float phi) {return r * cos(theta);}
+
+//Used to ensure conservation of kinetic energy via velocity normalization -- only needed for lower order approximations or high energies
+void normalizeVelocity(inout float3 velocity)
+{
+    velocity = _initialSpeed * normalize(velocity);
+}
+
+//Fields and Physics
+float3 calculateEarthMagneticField(float3 position) {
+    float r = getR(position);
+    float3 rUnit = normalize(position);
+
+    return _earthMagneticFieldMagnitude / pow(r, 3) * (3 * dot(_earthDipole, rUnit) * rUnit - _earthDipole);
+} 
+
+float3 constantField(float3 position) {
+    return float3(0, _earthMagneticFieldMagnitude, 0);
+} 
+
+float3 calculateAccelerationFromMagenticField(float3 velocity, float3 magneticField) {
+    return _particleCharge * cross(velocity, magneticField) / _particleMass;
+}
+
+//Euler Algorithms
+void eulerAlgorithm(inout float3 position, inout float3 velocity) {
+    velocity += calculateAccelerationFromMagenticField(velocity, calculateEarthMagneticField(position)) * _dt;
+    position += velocity * _dt;
+}
+
+void eulerAlgorithmNormalized(inout float3 position, inout float3 velocity) {
+    velocity += calculateAccelerationFromMagenticField(velocity, calculateEarthMagneticField(position)) * _dt;
+    velocity = _initialSpeed * normalize(velocity);
+    position += velocity * _dt;
+}
+
+//Runge-Kutta 4th Order
+void rk4Algorithm(inout float3 position, inout float3 velocity, float dt) {
+    float3 rp1 = position;
+    float3 vp1 = velocity;
+    float3 ap1 = calculateAccelerationFromMagenticField(vp1, calculateEarthMagneticField(rp1));
+
+    float3 rp2 = position + vp1 * (1/2.0) * dt;
+    float3 vp2 = velocity + ap1 * (1/2.0) * dt;
+    float3 ap2 = calculateAccelerationFromMagenticField(vp2, calculateEarthMagneticField(rp2));
+
+    float3 rp3 = position + vp2 * (1/2.0) * dt;
+    float3 vp3 = velocity + ap2 * (1/2.0) * dt;
+    float3 ap3 = calculateAccelerationFromMagenticField(vp3, calculateEarthMagneticField(rp3));
+
+    float3 rp4 = position + vp3 * dt;
+    float3 vp4 = velocity + ap3 * dt;
+    float3 ap4 = calculateAccelerationFromMagenticField(vp4, calculateEarthMagneticField(rp4));
+
+    position += (dt / 6) * (vp1 + 2 * vp2 + 2 * vp3 + vp4);
+    velocity += (dt / 6) * (ap1 + 2 * ap2 + 2 * ap3 + ap4);
+}
+
+void rk4Algorithm(inout float3 position, inout float3 velocity) {rk4Algorithm(position, velocity, _dt);}
+
+void rk4AlgorithmMultiRun(inout float3 position, inout float3 velocity, uint iterations) {
+    for(uint i = 0; i < iterations; i++) {
+        rk4Algorithm(position, velocity, _dt/iterations);
+    }
+}
+
+//Runge-Kutta 5th Order
+void rk5Algorithm(inout float3 position, inout float3 velocity, float dt) {
+    float3 rp1 = position;
+    float3 vp1 = velocity;
+    float3 ap1 = calculateAccelerationFromMagenticField(vp1, calculateEarthMagneticField(rp1));
+
+    float3 rp2 = position + (1/4.0) * vp1 * dt;
+    float3 vp2 = velocity + (1/4.0) * ap1 * dt;
+    float3 ap2 = calculateAccelerationFromMagenticField(vp2, calculateEarthMagneticField(rp2));
+
+    float3 rp3 = position + (3/32.0) * (vp1 + 3 * vp2) * dt;
+    float3 vp3 = velocity + (3/32.0) * (ap1 + 3 * ap2) * dt;
+    float3 ap3 = calculateAccelerationFromMagenticField(vp3, calculateEarthMagneticField(rp3));
+
+    float3 rp4 = position + (12/2197.0) * (161 * vp1 - 600 * vp2 + 608 * vp3) * dt;
+    float3 vp4 = velocity + (12/2197.0) * (161 * ap1 - 600 * ap2 + 608 * ap3) * dt;
+    float3 ap4 = calculateAccelerationFromMagenticField(vp4, calculateEarthMagneticField(rp4));
+
+    float3 rp5 = position + (1/4104.0) * (8341 * vp1 - 32832 * vp2 + 29440 * vp3 - 845 * vp4) * dt;
+    float3 vp5 = velocity + (1/4104.0) * (8341 * ap1 - 32832 * ap2 + 29440 * ap3 - 845 * ap4) * dt;
+    float3 ap5 = calculateAccelerationFromMagenticField(vp5, calculateEarthMagneticField(rp5));
+
+    float3 rp6 = position + ((-8/27.0) * vp1 + 2 * vp2 + (-3544/2565.0) * vp3 + (1859/4104.0) * vp4 + (11/40.0) * vp5) * dt;
+    float3 vp6 = velocity + ((-8/27.0) * ap1 + 2 * ap2 + (-3544/2565.0) * ap3 + (1859/4104.0) * ap4 + (11/40.0) * ap5) * dt;
+    float3 ap6 = calculateAccelerationFromMagenticField(vp6, calculateEarthMagneticField(rp6)); 
+
+    position += (dt/5) * ((16/27.0) * vp1 + (6656/2565.0) * vp3 + (28561/11286.0) * vp4 + (-9/10.0) * vp5 - (2/11.0) * vp6);
+    velocity += (dt/5) * ((16/27.0) * ap1 + (6656/2565.0) * ap3 + (28561/11286.0) * ap4 + (-9/10.0) * ap5 - (2/11.0) * ap6);
+}
+
+void rk5Algorithm(inout float3 position, inout float3 velocity) {rk5Algorithm(position, velocity, _dt);}
+
+void rk5AlgorithmMultiRun(inout float3 position, inout float3 velocity, uint iterations) {
+    for(uint i = 0; i < iterations; i++) {
+        rk5Algorithm(position, velocity, _dt/iterations);
+    }
+}
+
+//Runge-Kutta 6th Order
+void rk6Algorithm(inout float3 position, inout float3 velocity, float dt) {
+    float3 rp1 = position;
+    float3 vp1 = velocity;
+    float3 ap1 = calculateAccelerationFromMagenticField(vp1, calculateEarthMagneticField(rp1));
+
+    float3 rp2 = position + (1/3.0) * vp1 * dt;
+    float3 vp2 = velocity + (1/3.0) * ap1 * dt;
+    float3 ap2 = calculateAccelerationFromMagenticField(vp2, calculateEarthMagneticField(rp2));
+
+    float3 rp3 = position + ((0) * vp1 + (2/3.0) * vp2) * dt;
+    float3 vp3 = velocity + ((0) * ap1 + (2/3.0) * ap2) * dt;
+    float3 ap3 = calculateAccelerationFromMagenticField(vp3, calculateEarthMagneticField(rp3));
+
+    float3 rp4 = position + ((1/12.0) * vp1 + (4/12.0) * vp2 + (-1/12.0) * vp3) * dt;
+    float3 vp4 = velocity + ((1/12.0) * ap1 + (4/12.0) * ap2 + (-1/12.0) * ap3) * dt;
+    float3 ap4 = calculateAccelerationFromMagenticField(vp4, calculateEarthMagneticField(rp4));
+
+    float3 rp5 = position + ((-1/16.0) * vp1 + (18/16.0) * vp2 + (-3/16.0) * vp3 + (-6/16.0) * vp4) * dt;
+    float3 vp5 = velocity + ((-1/16.0) * ap1 + (18/16.0) * ap2 + (-3/16.0) * ap3 + (-6/16.0) * ap4) * dt;
+    float3 ap5 = calculateAccelerationFromMagenticField(vp5, calculateEarthMagneticField(rp5));
+
+    float3 rp6 = position + ((0) * vp1 + (9/8.0) * vp2 + (-3/8.0) * vp3 + (-6/8.0) * vp4 + (4/8.0) * vp5) * dt;
+    float3 vp6 = velocity + ((0) * ap1 + (9/8.0) * ap2 + (-3/8.0) * ap3 + (-6/8.0) * ap4 + (4/8.0) * ap5) * dt;
+    float3 ap6 = calculateAccelerationFromMagenticField(vp6, calculateEarthMagneticField(rp6));
+
+    float3 rp7 = position + ((9/44.0) * vp1 + (-36/44.0) * vp2 + (63/44.0) * vp3 + (72/44.0) * vp4 + (-64/44.0) * vp5 + (0) * vp6) * dt;
+    float3 vp7 = velocity + ((9/44.0) * ap1 + (-36/44.0) * ap2 + (63/44.0) * ap3 + (72/44.0) * ap4 + (-64/44.0) * ap5 + (0) * ap6) * dt;
+    float3 ap7 = calculateAccelerationFromMagenticField(vp7, calculateEarthMagneticField(rp7)); 
+
+    position += (dt/120) * (11 * vp1 + 81 * vp3  + 81 * vp4 - 32 * vp5 - 32 * vp6 + 11 * vp7);
+    velocity += (dt/120) * (11 * ap1 + 81 * ap3  + 81 * ap4 - 32 * ap5 - 32 * ap6 + 11 * ap7);
+}
+
+void rk6Algorithm(inout float3 position, inout float3 velocity)
+{
+    rk6Algorithm(position, velocity, _dt);
+}
+
+void rk6AlgorithmMultiRun(inout float3 position, inout float3 velocity, uint iterations) {
+    for(uint i = 0; i < iterations; i++) {
+        rk6Algorithm(position, velocity, _dt / iterations);
+    }
+}
+
+//Main Kernel
+[numthreads(threadCount,1,1)]
+void CSMain(uint3 id : SV_DispatchThreadID) { 
+    if(id.x < _ParticleCount) {
+        rk6AlgorithmMultiRun(_Position[id.x], _Velocity[id.x], 300);
+    }
+}
+//Main Kernel
+/*[numthreads(threadCount, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < _ParticleCount)
+    {
+        eulerAlgorithmNormalized(_Position[id.x], _Velocity[id.x]);
+    }
+}*/
+
